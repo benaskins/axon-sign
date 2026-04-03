@@ -3,13 +3,162 @@ package sign
 
 import (
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/benaskins/axon-sign/keys"
+	"golang.org/x/crypto/ssh"
 )
+
+// ManifestEntry records the path, content hash, Ed25519 signature, public key, and
+// fingerprint for one file. The PublicKey field (OpenSSH authorized_keys format) is
+// required so that VerifyManifest can verify signatures without any external key store.
+type ManifestEntry struct {
+	Path        string `json:"path"`
+	SHA256Hex   string `json:"sha256"`
+	Signature   string `json:"signature"`
+	PublicKey   string `json:"public_key"`
+	Fingerprint string `json:"fingerprint"`
+}
+
+// Manifest holds the signed entries produced by BatchSign.
+type Manifest struct {
+	Entries []ManifestEntry `json:"entries"`
+}
+
+// VerifyResult is the per-entry outcome from VerifyManifest.
+type VerifyResult struct {
+	Path string
+	OK   bool
+	Err  error
+}
+
+// BatchSign signs each file in paths, writes a .sig file alongside each, and returns a Manifest.
+func BatchSign(paths []string, priv keys.PrivateKey, pub keys.PublicKey) (Manifest, error) {
+	fingerprint := pub.Fingerprint()
+	authorizedKey := strings.TrimSpace(pub.MarshalAuthorizedKey())
+	entries := make([]ManifestEntry, 0, len(paths))
+	for _, p := range paths {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return Manifest{}, fmt.Errorf("batch sign: read %q: %w", p, err)
+		}
+		sum := sha256.Sum256(data)
+		sha256Hex := hex.EncodeToString(sum[:])
+
+		sig, err := Sign(data, priv)
+		if err != nil {
+			return Manifest{}, fmt.Errorf("batch sign: sign %q: %w", p, err)
+		}
+		if err := WriteSigFile(p, sig, fingerprint); err != nil {
+			return Manifest{}, fmt.Errorf("batch sign: write sig %q: %w", p, err)
+		}
+		entries = append(entries, ManifestEntry{
+			Path:        p,
+			SHA256Hex:   sha256Hex,
+			Signature:   sig,
+			PublicKey:   authorizedKey,
+			Fingerprint: fingerprint,
+		})
+	}
+	return Manifest{Entries: entries}, nil
+}
+
+// WriteManifest serialises m as JSON to dest.
+func WriteManifest(m Manifest, dest string) error {
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return fmt.Errorf("write manifest: marshal: %w", err)
+	}
+	if err := os.WriteFile(dest, data, 0o644); err != nil {
+		return fmt.Errorf("write manifest: write %q: %w", dest, err)
+	}
+	return nil
+}
+
+// ReadManifest deserialises a Manifest from a JSON file at path.
+func ReadManifest(path string) (Manifest, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Manifest{}, fmt.Errorf("read manifest: %w", err)
+	}
+	var m Manifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		return Manifest{}, fmt.Errorf("read manifest: unmarshal: %w", err)
+	}
+	return m, nil
+}
+
+// VerifyManifest re-reads each file referenced in m, verifies its SHA-256 hash and
+// Ed25519 signature, and returns a per-entry result. A non-nil top-level error is
+// returned only for structural problems; per-file failures appear as VerifyResult.OK == false.
+func VerifyManifest(m Manifest) ([]VerifyResult, error) {
+	results := make([]VerifyResult, 0, len(m.Entries))
+	for _, entry := range m.Entries {
+		r := VerifyResult{Path: entry.Path}
+
+		pub, err := parseAuthorizedKey(entry.PublicKey)
+		if err != nil {
+			r.Err = fmt.Errorf("parse public key: %w", err)
+			results = append(results, r)
+			continue
+		}
+
+		data, err := os.ReadFile(entry.Path)
+		if err != nil {
+			r.Err = fmt.Errorf("read file: %w", err)
+			results = append(results, r)
+			continue
+		}
+
+		sum := sha256.Sum256(data)
+		if hex.EncodeToString(sum[:]) != entry.SHA256Hex {
+			r.Err = errors.New("sha256 mismatch")
+			results = append(results, r)
+			continue
+		}
+
+		ok, err := Verify(data, entry.Signature, pub)
+		if err != nil {
+			r.Err = fmt.Errorf("signature decode: %w", err)
+			results = append(results, r)
+			continue
+		}
+		if !ok {
+			r.Err = errors.New("signature verification failed")
+			results = append(results, r)
+			continue
+		}
+
+		r.OK = true
+		results = append(results, r)
+	}
+	return results, nil
+}
+
+// parseAuthorizedKey parses an OpenSSH authorized_keys line and returns a keys.PublicKey.
+func parseAuthorizedKey(authorizedKey string) (keys.PublicKey, error) {
+	sshPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(authorizedKey))
+	if err != nil {
+		return nil, fmt.Errorf("parse authorized key: %w", err)
+	}
+	cryptoPub, ok := sshPub.(ssh.CryptoPublicKey)
+	if !ok {
+		return nil, errors.New("parse authorized key: not a crypto public key")
+	}
+	edPub, ok := cryptoPub.CryptoPublicKey().(ed25519.PublicKey)
+	if !ok {
+		return nil, errors.New("parse authorized key: not an Ed25519 key")
+	}
+	return keys.PublicKey(edPub), nil
+}
+
 
 // Sign signs data with the given private key and returns a base64-encoded signature.
 func Sign(data []byte, priv keys.PrivateKey) (string, error) {

@@ -1,6 +1,7 @@
 package sign_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -113,6 +114,156 @@ func TestSignFile(t *testing.T) {
 	}
 	if !ok {
 		t.Fatal("expected signature to verify")
+	}
+}
+
+func TestBatchSign(t *testing.T) {
+	pub, priv := generateTestKeyPair(t)
+
+	dir := t.TempDir()
+	paths := make([]string, 3)
+	for i := range paths {
+		paths[i] = filepath.Join(dir, fmt.Sprintf("file%d.txt", i))
+		if err := os.WriteFile(paths[i], []byte(fmt.Sprintf("content %d", i)), 0o644); err != nil {
+			t.Fatalf("write file: %v", err)
+		}
+	}
+
+	manifest, err := sign.BatchSign(paths, priv, pub)
+	if err != nil {
+		t.Fatalf("batch sign: %v", err)
+	}
+
+	if len(manifest.Entries) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(manifest.Entries))
+	}
+
+	fingerprint := pub.Fingerprint()
+	for i, entry := range manifest.Entries {
+		if entry.Path != paths[i] {
+			t.Errorf("entry %d: expected path %q, got %q", i, paths[i], entry.Path)
+		}
+		if entry.SHA256Hex == "" {
+			t.Errorf("entry %d: empty SHA256Hex", i)
+		}
+		if entry.Signature == "" {
+			t.Errorf("entry %d: empty Signature", i)
+		}
+		if entry.Fingerprint != fingerprint {
+			t.Errorf("entry %d: expected fingerprint %q, got %q", i, fingerprint, entry.Fingerprint)
+		}
+		// .sig file should exist alongside the original
+		sigPath := paths[i] + ".sig"
+		if _, err := os.Stat(sigPath); err != nil {
+			t.Errorf("entry %d: .sig file not written: %v", i, err)
+		}
+	}
+}
+
+func TestWriteReadManifest(t *testing.T) {
+	pub, priv := generateTestKeyPair(t)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "artifact.bin")
+	if err := os.WriteFile(path, []byte("data"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	manifest, err := sign.BatchSign([]string{path}, priv, pub)
+	if err != nil {
+		t.Fatalf("batch sign: %v", err)
+	}
+
+	dest := filepath.Join(dir, "manifest.json")
+	if err := sign.WriteManifest(manifest, dest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	got, err := sign.ReadManifest(dest)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+
+	if len(got.Entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(got.Entries))
+	}
+	if got.Entries[0].Path != manifest.Entries[0].Path {
+		t.Errorf("path mismatch: %q vs %q", got.Entries[0].Path, manifest.Entries[0].Path)
+	}
+	if got.Entries[0].SHA256Hex != manifest.Entries[0].SHA256Hex {
+		t.Errorf("SHA256Hex mismatch")
+	}
+	if got.Entries[0].Signature != manifest.Entries[0].Signature {
+		t.Errorf("Signature mismatch")
+	}
+	if got.Entries[0].Fingerprint != manifest.Entries[0].Fingerprint {
+		t.Errorf("Fingerprint mismatch")
+	}
+}
+
+func TestVerifyManifestClean(t *testing.T) {
+	pub, priv := generateTestKeyPair(t)
+
+	dir := t.TempDir()
+	paths := []string{
+		filepath.Join(dir, "a.txt"),
+		filepath.Join(dir, "b.txt"),
+	}
+	for _, p := range paths {
+		if err := os.WriteFile(p, []byte("clean content"), 0o644); err != nil {
+			t.Fatalf("write file: %v", err)
+		}
+	}
+
+	manifest, err := sign.BatchSign(paths, priv, pub)
+	if err != nil {
+		t.Fatalf("batch sign: %v", err)
+	}
+
+	results, err := sign.VerifyManifest(manifest)
+	if err != nil {
+		t.Fatalf("verify manifest: %v", err)
+	}
+
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+	for _, r := range results {
+		if !r.OK {
+			t.Errorf("expected %q to verify OK, err: %v", r.Path, r.Err)
+		}
+	}
+}
+
+func TestVerifyManifestTampered(t *testing.T) {
+	pub, priv := generateTestKeyPair(t)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "file.txt")
+	if err := os.WriteFile(path, []byte("original"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	manifest, err := sign.BatchSign([]string{path}, priv, pub)
+	if err != nil {
+		t.Fatalf("batch sign: %v", err)
+	}
+
+	// tamper the file after signing
+	if err := os.WriteFile(path, []byte("tampered"), 0o644); err != nil {
+		t.Fatalf("overwrite file: %v", err)
+	}
+
+	results, err := sign.VerifyManifest(manifest)
+	if err != nil {
+		t.Fatalf("verify manifest: %v", err)
+	}
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].OK {
+		t.Fatal("expected tampered file to fail verification")
 	}
 }
 
