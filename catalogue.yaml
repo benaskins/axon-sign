@@ -1,0 +1,148 @@
+name: Axon/Lamina
+language: go
+version: "1.26"
+description: Go toolkit for AI-powered services on Apple Silicon. Process supervision via aurelia.
+
+scaffold_command: "mkdir -p {{.Name}}/cmd/{{.Name}} && cd {{.Name}} && go mod init github.com/benaskins/{{.Name}}"
+verify_command: "cd {{.Name}} && go mod tidy && go build ./..."
+
+components:
+  - name: axon
+    class: platform
+    purpose: HTTP server lifecycle, config, auth, SSE, metrics
+    use_when: HTTP services only. CLI tools do not need axon.
+    package: github.com/benaskins/axon
+
+  - name: axon-loop
+    class: primitive
+    purpose: Provider-agnostic conversation loop for LLM agents
+    use_when: Any LLM interaction. Always paired with axon-talk and axon-tool.
+    package: github.com/benaskins/axon-loop
+    requires: [axon-talk, axon-tool]
+
+  - name: axon-tool
+    class: primitive
+    purpose: Tool definitions and execution for LLM agents
+    use_when: Always required with axon-loop. The loop drives behaviour through tool calls. Without axon-tool, the loop has no way to produce structured output.
+    package: github.com/benaskins/axon-tool
+
+  - name: axon-talk
+    class: primitive
+    purpose: LLM provider adapters (Anthropic, Ollama, Cloudflare Workers AI)
+    use_when: Always required with axon-loop. Connects the loop to an LLM provider.
+    package: github.com/benaskins/axon-talk
+
+  - name: axon-fact
+    class: primitive
+    purpose: "Event sourcing primitives: Event, EventStore, Projector, Publisher"
+    use_when: Audit trail, replay, training corpus
+    package: github.com/benaskins/axon-fact
+
+  - name: axon-nats
+    class: primitive
+    purpose: NATS adapters for cross-instance fan-out
+    use_when: Horizontal scaling, pub/sub
+    package: github.com/benaskins/axon-nats
+
+  - name: axon-auth
+    class: domain
+    purpose: WebAuthn/passkey authentication
+    use_when: Auth needed
+    package: github.com/benaskins/axon-auth
+
+  - name: axon-memo
+    class: domain
+    purpose: Long-term memory extraction and consolidation
+    use_when: Cross-session memory
+    package: github.com/benaskins/axon-memo
+
+  - name: axon-look
+    class: domain
+    purpose: Analytics event ingestion and querying (ClickHouse)
+    use_when: Analytics/observability
+    package: github.com/benaskins/axon-look
+
+  - name: axon-task
+    class: domain
+    purpose: Generic async task runner with pluggable workers
+    use_when: Async/background work
+    package: github.com/benaskins/axon-task
+
+  - name: axon-gate
+    class: domain
+    purpose: Deploy approval gate with Signal notifications
+    use_when: Deploy gating
+    package: github.com/benaskins/axon-gate
+
+  - name: axon-mind
+    class: experiment
+    purpose: Embedded Prolog engine for structured inference
+    use_when: Logic/rules engine
+    package: github.com/benaskins/axon-mind
+
+  - name: axon-lens
+    class: experiment
+    purpose: Image generation pipeline (FLUX.1 via MLX)
+    use_when: Image generation
+    package: github.com/benaskins/axon-lens
+
+  - name: axon-wire
+    class: experiment
+    purpose: HTTP transport routing through Cloudflare Worker proxy
+    use_when: Outbound HTTP via proxy
+    package: github.com/benaskins/axon-wire
+
+  - name: axon-synd
+    class: experiment
+    purpose: Personal syndication engine
+    use_when: Blog/social publishing
+    package: github.com/benaskins/axon-synd
+
+  - name: axon-eval
+    class: experiment
+    purpose: Evaluation framework for scenario plans
+    use_when: LLM output evaluation
+    package: github.com/benaskins/axon-eval
+
+patterns:
+  - requirement: HTTP service
+    pattern: "axon.ListenAndServe + axon.MustLoadConfig"
+  - requirement: CLI tool
+    pattern: "main.go with os.Args or flag parsing. No axon import needed."
+  - requirement: LLM conversation
+    pattern: "axon-loop + axon-talk + axon-tool (all three required). The loop orchestrates turns, talk connects to the LLM provider, tool defines the structured actions the model can take. Selecting axon-loop without axon-tool means the model has no tools to call and cannot produce structured output."
+  - requirement: Async/background work
+    pattern: "axon-task + axon-fact; never block HTTP handlers"
+  - requirement: Authentication
+    pattern: "axon-auth (WebAuthn/passkeys)"
+  - requirement: Event audit trail / replay
+    pattern: "axon-fact projectors"
+  - requirement: Cross-session memory
+    pattern: "axon-memo"
+  - requirement: Cross-instance fan-out
+    pattern: "axon-nats"
+  - requirement: Process supervision
+    pattern: "aurelia service YAML"
+  - requirement: Deterministic logic
+    pattern: "Go code, no LLM needed"
+  - requirement: Non-deterministic logic
+    pattern: "axon-loop, never raw LLM calls"
+
+file_conventions:
+  - path: "main.go"
+    description: "Entry point. HTTP services: imports axon, calls axon.ListenAndServe. CLI tools: parses args, wires deps, runs pipeline."
+  - path: "justfile"
+    description: "build, install, test targets using just"
+  - path: "AGENTS.md"
+    description: "Architecture, module selections, boundaries, dep graph"
+  - path: "CLAUDE.md"
+    description: "Working instructions for Claude Code"
+  - path: "README.md"
+    description: "What it is, how to run it"
+  - path: "plans/YYYY-MM-DD-initial-build.md"
+    description: "Commit-sized plan steps"
+
+boundary_notes: |
+  The boundary between a caller and axon-loop is always non-det.
+  The boundary between axon-loop and axon-talk is det (provider selection is deterministic).
+  The boundary between axon-tool and its tool implementations depends on what the tools do.
