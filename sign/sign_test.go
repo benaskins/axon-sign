@@ -7,7 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/benaskins/axon-sign/keystore"
 	"github.com/benaskins/axon-sign/keys"
+	"github.com/benaskins/axon-sign/rotation"
 	"github.com/benaskins/axon-sign/sign"
 )
 
@@ -264,6 +266,112 @@ func TestVerifyManifestTampered(t *testing.T) {
 	}
 	if results[0].OK {
 		t.Fatal("expected tampered file to fail verification")
+	}
+}
+
+func makeSignTestKeystore(t *testing.T) *keystore.FSKeystore {
+	t.Helper()
+	ks, err := keystore.NewFSKeystore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewFSKeystore: %v", err)
+	}
+	return ks
+}
+
+func storeKeyInKS(t *testing.T, ks keystore.Keystore, name string, passphrase []byte) (keys.PublicKey, keys.PrivateKey) {
+	t.Helper()
+	pub, priv, err := keys.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair: %v", err)
+	}
+	enc, err := keys.EncryptPrivateKey(priv, passphrase)
+	if err != nil {
+		t.Fatalf("EncryptPrivateKey: %v", err)
+	}
+	if err := ks.StoreKey(name, pub, enc); err != nil {
+		t.Fatalf("StoreKey: %v", err)
+	}
+	return pub, priv
+}
+
+func TestVerifyWithRotation_RotateOnce(t *testing.T) {
+	ks := makeSignTestKeystore(t)
+	passphrase := []byte("test-pass")
+
+	// Store original key and sign data.
+	_, origPriv := storeKeyInKS(t, ks, "mykey", passphrase)
+	data := []byte("artifact to sign")
+	sig, err := sign.Sign(data, origPriv)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+
+	// Rotate to a new key.
+	if _, err := rotation.RotateKey(ks, "mykey", passphrase); err != nil {
+		t.Fatalf("RotateKey: %v", err)
+	}
+
+	// Old signature must still verify via rotated key lookup.
+	ok, err := sign.VerifyWithRotation(data, sig, ks, "mykey", passphrase)
+	if err != nil {
+		t.Fatalf("VerifyWithRotation: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected old signature to verify after one rotation")
+	}
+}
+
+func TestVerifyWithRotation_RotateTwice(t *testing.T) {
+	ks := makeSignTestKeystore(t)
+	passphrase := []byte("test-pass")
+
+	// Store original key and sign data.
+	_, origPriv := storeKeyInKS(t, ks, "mykey", passphrase)
+	data := []byte("artifact to sign")
+	sig, err := sign.Sign(data, origPriv)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+
+	// Rotate twice.
+	if _, err := rotation.RotateKey(ks, "mykey", passphrase); err != nil {
+		t.Fatalf("RotateKey (1): %v", err)
+	}
+	if _, err := rotation.RotateKey(ks, "mykey", passphrase); err != nil {
+		t.Fatalf("RotateKey (2): %v", err)
+	}
+
+	// Oldest signature must still verify via rotated key lookup.
+	ok, err := sign.VerifyWithRotation(data, sig, ks, "mykey", passphrase)
+	if err != nil {
+		t.Fatalf("VerifyWithRotation: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected oldest signature to verify after two rotations")
+	}
+}
+
+func TestVerifyWithRotation_UnknownKey(t *testing.T) {
+	ks := makeSignTestKeystore(t)
+	passphrase := []byte("test-pass")
+
+	// Sign with a key that is never stored in the keystore.
+	_, priv, err := keys.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair: %v", err)
+	}
+	sig, err := sign.Sign([]byte("data"), priv)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+
+	// Keystore has no key named "unknown".
+	ok, err := sign.VerifyWithRotation([]byte("data"), sig, ks, "unknown", passphrase)
+	if err != nil {
+		t.Fatalf("VerifyWithRotation returned unexpected error: %v", err)
+	}
+	if ok {
+		t.Fatal("expected false for unknown key")
 	}
 }
 

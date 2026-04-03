@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/benaskins/axon-sign/keystore"
 	"github.com/benaskins/axon-sign/keys"
 	"golang.org/x/crypto/ssh"
 )
@@ -178,6 +179,43 @@ func Verify(data []byte, sig string, pub keys.PublicKey) (bool, error) {
 	}
 	// ed25519.Verify uses constant-time comparison internally.
 	return ed25519.Verify(ed25519.PublicKey(pub), data, sigBytes), nil
+}
+
+// VerifyWithRotation verifies sig against data using the named key from ks. It
+// tries the current active key first, then each rotated key in rotation order
+// (oldest first). Returns true on the first successful match. Returns false
+// (without error) when the key is not found or no key matches the signature.
+// The passphrase parameter is accepted for API symmetry with signing helpers
+// but is not used during verification.
+func VerifyWithRotation(data []byte, sig string, ks keystore.Keystore, name string, passphrase []byte) (bool, error) {
+	// Try active key first.
+	if pub, _, err := ks.LoadKey(name); err == nil {
+		ok, verr := Verify(data, sig, pub)
+		if verr != nil {
+			return false, verr
+		}
+		if ok {
+			return true, nil
+		}
+	}
+
+	// Fall back to rotated keys (oldest first).
+	rotated, err := ks.LoadRotatedKeys(name)
+	if err != nil {
+		// Key doesn't exist or has no rotated history — no match.
+		return false, nil
+	}
+	for _, rpub := range rotated {
+		ok, verr := Verify(data, sig, rpub)
+		if verr != nil {
+			continue
+		}
+		if ok {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
 
 // SignFile reads the file at path and returns a base64-encoded signature over its contents.

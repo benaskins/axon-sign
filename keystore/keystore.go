@@ -19,6 +19,12 @@ type Keystore interface {
 	LoadKey(name string) (keys.PublicKey, []byte, error)
 	ListKeys() ([]string, error)
 	DeleteKey(name string) error
+	// MarkRotated renames the active key files to rotated variants so they are
+	// preserved for multi-key signature verification after a key rotation.
+	MarkRotated(name string) error
+	// LoadRotatedKeys returns the public keys of all rotated versions of name,
+	// in rotation order (oldest first).
+	LoadRotatedKeys(name string) ([]keys.PublicKey, error)
 }
 
 // FSKeystore is a filesystem-backed Keystore.
