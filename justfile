@@ -1,8 +1,5 @@
 build:
-    go build -o bin/axon-sign ./cmd/axon-sign
-
-install: build
-    cp bin/axon-sign ~/.local/bin/axon-sign
+    go build ./...
 
 test:
     go test ./...
