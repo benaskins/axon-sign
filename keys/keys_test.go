@@ -2,6 +2,7 @@ package keys
 
 import (
 	"crypto/ed25519"
+	"encoding/pem"
 	"regexp"
 	"strings"
 	"testing"
@@ -56,6 +57,82 @@ func TestMarshalPEM(t *testing.T) {
 	}
 	if !strings.HasPrefix(string(pemData), "-----BEGIN PUBLIC KEY-----") {
 		t.Errorf("expected PEM header, got: %q", string(pemData[:min(len(pemData), 40)]))
+	}
+}
+
+func TestEncryptDecryptRoundTrip(t *testing.T) {
+	_, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair: %v", err)
+	}
+
+	passphrase := []byte("correct horse battery staple")
+
+	pemData, err := EncryptPrivateKey(priv, passphrase)
+	if err != nil {
+		t.Fatalf("EncryptPrivateKey: %v", err)
+	}
+
+	recovered, err := DecryptPrivateKey(pemData, passphrase)
+	if err != nil {
+		t.Fatalf("DecryptPrivateKey: %v", err)
+	}
+
+	if len(recovered) != len(priv) {
+		t.Fatalf("recovered key length: got %d, want %d", len(recovered), len(priv))
+	}
+	for i := range priv {
+		if recovered[i] != priv[i] {
+			t.Fatalf("recovered key differs at byte %d", i)
+		}
+	}
+}
+
+func TestEncryptedPEMIsValidPEM(t *testing.T) {
+	_, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair: %v", err)
+	}
+
+	pemData, err := EncryptPrivateKey(priv, []byte("passphrase"))
+	if err != nil {
+		t.Fatalf("EncryptPrivateKey: %v", err)
+	}
+
+	block, _ := pem.Decode(pemData)
+	if block == nil {
+		t.Fatal("pem.Decode returned nil block")
+	}
+	if block.Type != "ENCRYPTED PRIVATE KEY" {
+		t.Errorf("PEM type: got %q, want %q", block.Type, "ENCRYPTED PRIVATE KEY")
+	}
+	if block.Headers["Argon2id-Salt"] == "" {
+		t.Error("PEM header Argon2id-Salt is missing")
+	}
+	if block.Headers["Argon2id-Nonce"] == "" {
+		t.Error("PEM header Argon2id-Nonce is missing")
+	}
+}
+
+func TestDecryptWrongPassphrase(t *testing.T) {
+	_, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair: %v", err)
+	}
+
+	pemData, err := EncryptPrivateKey(priv, []byte("correct"))
+	if err != nil {
+		t.Fatalf("EncryptPrivateKey: %v", err)
+	}
+
+	_, err = DecryptPrivateKey(pemData, []byte("wrong"))
+	if err == nil {
+		t.Fatal("expected error with wrong passphrase, got nil")
+	}
+	// Error must not contain passphrase or key bytes
+	errStr := err.Error()
+	if strings.Contains(errStr, "wrong") || strings.Contains(errStr, "correct") {
+		t.Errorf("error message leaks passphrase: %q", errStr)
 	}
 }
 
